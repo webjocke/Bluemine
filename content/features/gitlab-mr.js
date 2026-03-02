@@ -1225,6 +1225,7 @@ async function applyGitlabAssigneeAvatarsToTaskCards(
       assigneeEntries,
       cachedResult.avatarsByName,
     );
+    Object.assign(_lastAvatarsByName, cachedResult.avatarsByName);
     signalCachedApplied();
 
     const unresolvedAssigneeNames = uniqueAssigneeNames.filter(
@@ -1246,12 +1247,60 @@ async function applyGitlabAssigneeAvatarsToTaskCards(
       assigneeEntries,
       networkResult.avatarsByName,
     );
+    Object.assign(_lastAvatarsByName, networkResult.avatarsByName);
   } catch (error) {
     console.warn("[Bluemine] Failed to load GitLab assignee avatars:", error);
     signalCachedApplied();
   }
 
   return requestMetricsSummary;
+}
+
+// Module-level state for the drag-drop card observer.
+let _lastMrResults = null;
+let _lastAvatarsByName = {};
+let _cardObserver = null;
+
+// Re-apply GitLab badges to cards replaced by the Agile plugin's drag-and-drop.
+// When a card is dragged to a new column, agileBoard.successSortable replaces
+// its DOM node with fresh server HTML, losing any injected badges. A
+// MutationObserver watches for newly added .issue-card nodes and re-applies
+// from the in-memory MR cache without an extra network request.
+// Note: innerHTML swaps (soft reload) add <tbody> nodes, not .issue-card, so
+// they never trigger this observer — runGitlabMrStatusFeature handles those.
+function startCardObserverForDragDrop(boardProjectName) {
+  if (_cardObserver) {
+    _cardObserver.disconnect();
+    _cardObserver = null;
+  }
+
+  const boardTable = findBoardTable();
+  if (!boardTable) return;
+
+  _cardObserver = new MutationObserver((mutations) => {
+    const hasNewCard = mutations.some((mutation) =>
+      Array.from(mutation.addedNodes).some(
+        (node) =>
+          node.nodeType === Node.ELEMENT_NODE &&
+          node.classList?.contains("issue-card") &&
+          !node.classList?.contains("ui-sortable-placeholder"),
+      ),
+    );
+    if (!hasNewCard) return;
+
+    // Apply synchronously — MutationObserver callbacks fire as microtasks,
+    // before the browser paints, so the replaced card never appears without
+    // its badges (no blink).
+    if (_lastMrResults !== null) {
+      applyGitlabMergeRequestsToBoard(_lastMrResults, { animate: true });
+    }
+    applyTaskCardAssigneeAvatarsFromMap(
+      collectTaskCardAssigneeEntries(),
+      _lastAvatarsByName,
+    );
+  });
+
+  _cardObserver.observe(boardTable, { childList: true, subtree: true });
 }
 
 async function runGitlabMrStatusFeature() {
@@ -1277,6 +1326,7 @@ async function runGitlabMrStatusFeature() {
 
   if (boardIssueIds.length === 0) {
     applyGitlabMergeRequestsToBoard([], { animate: false });
+    _lastMrResults = [];
   } else {
     try {
       const cachedMrResult = await fetchGitlabMergeRequests(
@@ -1291,6 +1341,7 @@ async function runGitlabMrStatusFeature() {
       applyGitlabMergeRequestsToBoard(cachedMrResult.mergeRequests, {
         animate: false,
       });
+      _lastMrResults = cachedMrResult.mergeRequests;
     } catch (error) {
       console.warn(
         "[Bluemine] Failed to load cached GitLab merge requests:",
@@ -1311,6 +1362,7 @@ async function runGitlabMrStatusFeature() {
       applyGitlabMergeRequestsToBoard(networkMrResult.mergeRequests, {
         animate: true,
       });
+      _lastMrResults = networkMrResult.mergeRequests;
     } catch (error) {
       console.warn("[Bluemine] Failed to load GitLab merge requests:", error);
     }
@@ -1325,6 +1377,8 @@ async function runGitlabMrStatusFeature() {
       error,
     );
   }
+
+  startCardObserverForDragDrop(boardProjectName);
 
   const durationMs = Math.max(0, Math.round(performance.now() - startTimeMs));
   const durationSeconds = (durationMs / 1000).toFixed(2);
