@@ -42,6 +42,16 @@ async function softReloadBoard(featureResult, selectedIds = []) {
     if (featureResult[GITLAB_MR_FEATURE_KEY]) {
       await runGitlabMrStatusFeature();
     }
+
+    // Re-initialise the Agile plugin's drag-and-drop last, after all DOM
+    // manipulation is complete. The innerHTML swap destroys the sortable/
+    // droppable bindings attached to the old nodes. Loaded as an extension
+    // script file (not inline) so it passes the page's CSP, and runs in the
+    // page JS context where agileBoard lives.
+    const reinitScript = document.createElement("script");
+    reinitScript.onload = () => reinitScript.remove();
+    reinitScript.src = browserAPI.runtime.getURL("content/reinit-agile-board.js");
+    document.head.appendChild(reinitScript);
   } catch (_e) {
     // Any failure falls back to a full page reload.
     window.location.reload();

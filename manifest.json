@@ -42,6 +42,12 @@
       "run_at": "document_idle"
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/reinit-agile-board.js"],
+      "matches": ["https://*/*", "http://*/*"]
+    }
+  ],
   "browser_specific_settings": {
     "gecko": {
       "id": "bluemine@bluemine.extension",
