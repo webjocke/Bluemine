@@ -1303,7 +1303,7 @@ function startCardObserverForDragDrop(boardProjectName) {
   _cardObserver.observe(boardTable, { childList: true, subtree: true });
 }
 
-async function runGitlabMrStatusFeature() {
+async function runGitlabMrStatusFeature(options = {}) {
   const boardProjectName = getCurrentBoardProjectName();
   if (!boardProjectName) {
     return;
@@ -1327,6 +1327,7 @@ async function runGitlabMrStatusFeature() {
   if (boardIssueIds.length === 0) {
     applyGitlabMergeRequestsToBoard([], { animate: false });
     _lastMrResults = [];
+    options.onCachedApplied?.();
   } else {
     try {
       const cachedMrResult = await fetchGitlabMergeRequests(
@@ -1348,6 +1349,8 @@ async function runGitlabMrStatusFeature() {
         error,
       );
     }
+
+    options.onCachedApplied?.();
 
     try {
       const networkMrResult = await fetchGitlabMergeRequests(

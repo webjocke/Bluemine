@@ -1,3 +1,17 @@
+const _removeBoardOverlay = (() => {
+  if (!isAgileBoardPage()) return null;
+  const el = document.createElement("div");
+  el.style.cssText =
+    "position:fixed;inset:0;background:#fff;z-index:999999;pointer-events:none";
+  document.documentElement.appendChild(el);
+  let removed = false;
+  return () => {
+    if (removed) return;
+    removed = true;
+    requestIdleCallback(() => el.remove(), { timeout: 3000 });
+  };
+})();
+
 browserAPI.storage.local.get(
   {
     [GITLAB_MR_FEATURE_KEY]: false,
@@ -27,6 +41,7 @@ browserAPI.storage.local.get(
       if (result[COMMAND_PALETTE_FEATURE_KEY] && isAgileBoardPage()) {
         runCommandPaletteFeature(result);
       }
+      _removeBoardOverlay?.();
       return;
     }
 
@@ -43,7 +58,8 @@ browserAPI.storage.local.get(
     }
 
     if (result[GITLAB_MR_FEATURE_KEY]) {
-      await runGitlabMrStatusFeature();
+      await runGitlabMrStatusFeature({ onCachedApplied: _removeBoardOverlay });
     }
+    _removeBoardOverlay?.();
   },
 );
