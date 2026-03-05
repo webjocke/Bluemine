@@ -125,7 +125,8 @@ function runCommandPaletteFeature(featureResult) {
         if (!nameQ) return catItems;
         return catItems
           .map((c) => {
-            if (matchesPersonAbbreviation(c.label, nameQ)) return { c, score: 0 };
+            if (matchesPersonAbbreviation(c.label, nameQ))
+              return { c, score: 0 };
             if (c.label.toLowerCase().includes(nameQ)) return { c, score: 1 };
             if (fuzzyMatch(c.label, nameQ)) return { c, score: 2 };
             return null;
@@ -146,7 +147,11 @@ function runCommandPaletteFeature(featureResult) {
 
     return allCommands
       .map((c) => {
-        if (PERSON_CATEGORIES.has(c.category) && matchesPersonAbbreviation(c.label, q)) return { c, score: 0 };
+        if (
+          PERSON_CATEGORIES.has(c.category) &&
+          matchesPersonAbbreviation(c.label, q)
+        )
+          return { c, score: 0 };
         const combined = `${c.category} ${c.label}`.toLowerCase();
         if (combined.includes(q)) return { c, score: 1 };
         if (fuzzyMatch(c.label, q)) return { c, score: 2 };
@@ -211,7 +216,10 @@ function runCommandPaletteFeature(featureResult) {
       const parsed = new URL(patchCmds[0].action.url, window.location.origin);
       for (let i = 1; i < patchCmds.length; i++) {
         try {
-          const other = new URL(patchCmds[i].action.url, window.location.origin);
+          const other = new URL(
+            patchCmds[i].action.url,
+            window.location.origin,
+          );
           for (const [key, val] of other.searchParams) {
             if (key.startsWith("issue[")) {
               parsed.searchParams.append(key, val);
@@ -253,7 +261,7 @@ function runCommandPaletteFeature(featureResult) {
       browserAPI.storage.local.get(
         { [COMMAND_PALETTE_ID_SEPARATOR_KEY]: "" },
         (result) => {
-          const sep = result[COMMAND_PALETTE_ID_SEPARATOR_KEY] || " & ";
+          const sep = result[COMMAND_PALETTE_ID_SEPARATOR_KEY] || ", ";
           navigator.clipboard.writeText(ids.join(sep)).catch(() => {});
         },
       );
@@ -304,7 +312,8 @@ function runCommandPaletteFeature(featureResult) {
     const renderOrder = filteredCommands
       .map((cmd, originalIndex) => ({ cmd, originalIndex }))
       .sort((a, b) => {
-        const ab = isBlockedCmd(a.cmd), bb = isBlockedCmd(b.cmd);
+        const ab = isBlockedCmd(a.cmd),
+          bb = isBlockedCmd(b.cmd);
         return ab === bb ? 0 : ab ? 1 : -1;
       });
 
@@ -702,8 +711,14 @@ function runCommandPaletteFeature(featureResult) {
           // item if it hasn't been queued yet.
           const toExecute = [...queuedCommands];
           const activeCmd = filteredCommands[activeIndex];
-          if (activeCmd && !activeCmd.disabled && activeCmd.action?.type === "patch") {
-            const alreadyQueued = toExecute.some((c) => c.category === activeCmd.category);
+          if (
+            activeCmd &&
+            !activeCmd.disabled &&
+            activeCmd.action?.type === "patch"
+          ) {
+            const alreadyQueued = toExecute.some(
+              (c) => c.category === activeCmd.category,
+            );
             if (!alreadyQueued) {
               toExecute.push(activeCmd);
             }

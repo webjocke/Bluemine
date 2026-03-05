@@ -131,17 +131,23 @@
                     <span class="row-copy">
                         <span class="setting-title">Enhanced Agile board</span>
                         <span class="setting-subtitle"
-                            >– Restore scroll position on reload</span
+                            >– Updating a task now soft reloads the board
+                            instead of a full page reload</span
                         >
                         <span class="setting-subtitle"
-                            >– Auto-reload when navigating back to board</span
+                            >– Auto-reload Agile board when loaded from
+                            cache</span
                         >
                         <span class="setting-subtitle"
-                            >– Remember collapsed/expanded row state</span
+                            >– Fix broken collapse/expand buttons and move them
+                            above the board</span
                         >
                         <span class="setting-subtitle"
-                            >– Collapse all/Expand all buttons fixed so they now
-                            work and added above the board</span
+                            >– Smart-collapse swim rows that aren't relevant to
+                            you</span
+                        >
+                        <span class="setting-subtitle"
+                            >– Remember collapsed/expanded swim row state</span
                         >
                     </span>
                     <span class="switch-shell">
@@ -200,14 +206,16 @@
                     aria-hidden="true"
                 >
                     <div class="input-row">
-                        <label class="field-name" for="command-palette-separator"
+                        <label
+                            class="field-name"
+                            for="command-palette-separator"
                             >Copy IDs separator</label
                         >
                         <input
                             id="command-palette-separator"
                             class="row-input"
                             type="text"
-                            placeholder=" & "
+                            placeholder=", "
                             spellcheck="false"
                         />
                     </div>
