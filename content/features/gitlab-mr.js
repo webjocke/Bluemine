@@ -1,796 +1,3 @@
-/* global browserAPI */
-
-const GITLAB_MR_FEATURE_KEY = "feature.gitlabMrStatus.enabled";
-const ENHANCED_AGILE_BOARD_FEATURE_KEY =
-  "feature.restoreScrollOnReload.enabled";
-const SHIFT_HOVER_SELECTION_FEATURE_KEY =
-  "feature.shiftHoverSelection.enabled";
-const BOARD_PATH_REGEX = /\/projects\/([^/]+)\/agile\/board\/?$/;
-const SCROLL_RESTORE_STATE_KEY = "bluemine.scrollRestoreState.v1";
-const SCROLL_RESTORE_WAIT_TIMEOUT_MS = 20000;
-const SCROLL_RESTORE_RETRY_INTERVAL_MS = 120;
-const SCROLL_RESTORE_TOLERANCE_PX = 2;
-const SCROLL_RESTORE_MAX_AGE_MS = 30 * 60 * 1000;
-const SCROLL_RESTORE_OVERLAY_ID = "bluemine-scroll-restore-overlay";
-const SCROLL_RESTORE_OVERLAY_STYLE_ID = "bluemine-scroll-restore-overlay-style";
-const MR_TITLE_PREFIX_REGEX = /^(\d{5}(?:\s*[^\d\s]\s*\d{5})*) - /;
-const MR_CONTAINER_CLASS = "bluemine-mr-status";
-const MR_STYLE_ID = "bluemine-mr-status-style";
-const MR_ATTRIBUTE_LINE_CLASS = "bluemine-gitlab-attribute-line";
-const GITLAB_ASSIGNEE_AVATAR_CLASS = "bluemine-gitlab-assignee-avatar";
-const GITLAB_FADE_IN_CLASS = "bluemine-gitlab-fade-in";
-const MR_CARD_STATUS_SIGNATURE_ATTRIBUTE =
-  "data-bluemine-mr-card-status-signature";
-const MR_STORY_STATUS_SIGNATURE_ATTRIBUTE =
-  "data-bluemine-mr-story-status-signature";
-const MR_DETAIL_SIGNATURE_ATTRIBUTE = "data-bluemine-mr-detail-signature";
-const REDMINE_REVIEWER_NAME_ATTRIBUTE = "data-bluemine-redmine-reviewer-name";
-const GITLAB_ICON_PATH =
-  "M22.547 13.374l-2.266-6.977a.783.783 0 0 0-.744-.53h-3.03L12 19.78 7.494 5.867H4.463a.783.783 0 0 0-.744.53l-2.266 6.977a1.523 1.523 0 0 0 .553 1.704L12 22.422l9.994-7.344a1.523 1.523 0 0 0 .553-1.704Z";
-const COLLAPSED_GROUPS_SESSION_KEY_PREFIX = "bluemine.collapsedGroups.v1.";
-const COLLAPSED_GROUP_NONE_ID = "__none__";
-const SWIMLANE_TOOLBAR_ID = "bluemine-swimlane-toolbar";
-const SWIMLANE_TOOLBAR_STYLE_ID = "bluemine-swimlane-toolbar-style";
-let hasRegisteredScrollTracker = false;
-let lastKnownWindowScrollY = 0;
-let shouldHoldScrollRestoreOverlayForScroll = false;
-let shouldHoldScrollRestoreOverlayForGitlab = false;
-
-function detectRedmineFromDOM() {
-  const hasRedmineMetaTag = Boolean(
-    document.querySelector(
-      'meta[name="csrf-param"][content="authenticity_token"]',
-    ),
-  );
-  const hasRedmineBody = Boolean(
-    document.querySelector("body.controller-agile_boards") ||
-    document.querySelector("body.controller-issues") ||
-    document.querySelector("body.controller-projects") ||
-    document.querySelector("body.controller-wiki") ||
-    document.querySelector("body.controller-timelog") ||
-    document.getElementById("main-menu"),
-  );
-  return hasRedmineMetaTag || hasRedmineBody;
-}
-
-function registerRedmineTabDetection() {
-  const isRedmine = detectRedmineFromDOM();
-  return new Promise((resolve) => {
-    browserAPI.runtime.sendMessage(
-      {
-        type: "BLUEMINE_REGISTER_REDMINE_TAB",
-        isRedmine,
-      },
-      (response) => {
-        if (browserAPI.runtime.lastError) {
-          resolve(isRedmine);
-          return;
-        }
-
-        resolve(Boolean(response?.ok) ? isRedmine : false);
-      },
-    );
-  });
-}
-
-function isDetectedRedmineTab() {
-  return registerRedmineTabDetection();
-}
-
-function getCurrentBoardProjectName() {
-  try {
-    const current = new URL(window.location.href);
-    const match = current.pathname.match(BOARD_PATH_REGEX);
-    if (!match) {
-      return "";
-    }
-
-    return decodeURIComponent(match[1]);
-  } catch (_error) {
-    return "";
-  }
-}
-
-function isAgileBoardPage() {
-  return Boolean(getCurrentBoardProjectName());
-}
-
-function getNavigationType() {
-  const navigationEntries =
-    typeof performance.getEntriesByType === "function"
-      ? performance.getEntriesByType("navigation")
-      : [];
-  const navigationEntry = navigationEntries?.[0];
-  if (navigationEntry && typeof navigationEntry.type === "string") {
-    return navigationEntry.type;
-  }
-
-  if (performance.navigation) {
-    if (performance.navigation.type === 1) {
-      return "reload";
-    }
-
-    if (performance.navigation.type === 2) {
-      return "back_forward";
-    }
-
-    if (performance.navigation.type === 0) {
-      return "navigate";
-    }
-  }
-
-  return "unknown";
-}
-
-function normalizePageUrl(rawUrl, baseUrl = window.location.href) {
-  try {
-    const parsed = new URL(String(rawUrl || "").trim(), baseUrl);
-    const normalizedPath =
-      parsed.pathname === "/" ? "/" : parsed.pathname.replace(/\/+$/, "");
-    return `${parsed.origin}${normalizedPath}${parsed.search}`;
-  } catch (_error) {
-    return "";
-  }
-}
-
-function isBackUrlRedirectToCurrentBoard(currentPageUrl) {
-  const referrer = String(document.referrer || "").trim();
-  if (!referrer) {
-    return false;
-  }
-
-  try {
-    const referrerUrl = new URL(referrer);
-    const backUrl = String(
-      referrerUrl.searchParams.get("back_url") || "",
-    ).trim();
-    if (!backUrl) {
-      return false;
-    }
-
-    const normalizedBackUrl = normalizePageUrl(backUrl, referrerUrl.origin);
-    if (!normalizedBackUrl) {
-      return false;
-    }
-
-    return normalizedBackUrl === currentPageUrl;
-  } catch (_error) {
-    return false;
-  }
-}
-
-function isSamePageReferrerNavigation(currentPageUrl) {
-  const normalizedReferrer = normalizePageUrl(document.referrer);
-  if (!normalizedReferrer) {
-    return false;
-  }
-
-  return normalizedReferrer === currentPageUrl;
-}
-
-function clearStoredScrollRestoreState() {
-  try {
-    window.sessionStorage.removeItem(SCROLL_RESTORE_STATE_KEY);
-  } catch (_error) {
-    // Ignore sessionStorage access errors.
-  }
-}
-
-function removeScrollRestoreOverlay() {
-  document.getElementById(SCROLL_RESTORE_OVERLAY_ID)?.remove();
-  document.getElementById(SCROLL_RESTORE_OVERLAY_STYLE_ID)?.remove();
-}
-
-function ensureScrollRestoreOverlay() {
-  if (!document.getElementById(SCROLL_RESTORE_OVERLAY_STYLE_ID)) {
-    const style = document.createElement("style");
-    style.id = SCROLL_RESTORE_OVERLAY_STYLE_ID;
-    style.textContent = `
-      #${SCROLL_RESTORE_OVERLAY_ID} {
-        position: fixed;
-        inset: 0;
-        background: #fff;
-        z-index: 2147483647;
-        pointer-events: none;
-        opacity: 1;
-      }
-    `;
-    (document.head || document.documentElement).appendChild(style);
-  }
-
-  if (document.getElementById(SCROLL_RESTORE_OVERLAY_ID)) {
-    return;
-  }
-
-  const overlay = document.createElement("div");
-  overlay.id = SCROLL_RESTORE_OVERLAY_ID;
-  (document.body || document.documentElement).appendChild(overlay);
-}
-
-function removeScrollRestoreOverlayIfReady() {
-  if (
-    shouldHoldScrollRestoreOverlayForScroll ||
-    shouldHoldScrollRestoreOverlayForGitlab
-  ) {
-    return;
-  }
-
-  removeScrollRestoreOverlay();
-}
-
-function setScrollRestoreOverlayHoldForScroll(shouldHold) {
-  shouldHoldScrollRestoreOverlayForScroll = Boolean(shouldHold);
-  if (!shouldHoldScrollRestoreOverlayForScroll) {
-    removeScrollRestoreOverlayIfReady();
-  }
-}
-
-function setScrollRestoreOverlayHoldForGitlab(shouldHold) {
-  shouldHoldScrollRestoreOverlayForGitlab = Boolean(shouldHold);
-  if (!shouldHoldScrollRestoreOverlayForGitlab) {
-    removeScrollRestoreOverlayIfReady();
-  }
-}
-
-function waitForNextPaint() {
-  return new Promise((resolve) => {
-    window.requestAnimationFrame(() => resolve());
-  });
-}
-
-function readStoredScrollRestoreState() {
-  try {
-    const rawState = window.sessionStorage.getItem(SCROLL_RESTORE_STATE_KEY);
-    if (!rawState) {
-      return null;
-    }
-
-    const parsedState = JSON.parse(rawState);
-    const pageUrl = normalizePageUrl(parsedState?.pageUrl || parsedState?.url);
-    const scrollY = Number(parsedState?.scrollY);
-    const savedAtMs = Number(parsedState?.savedAtMs || 0);
-    const isTooOld =
-      !Number.isFinite(savedAtMs) ||
-      savedAtMs <= 0 ||
-      Date.now() - savedAtMs > SCROLL_RESTORE_MAX_AGE_MS;
-    if (!pageUrl || !Number.isFinite(scrollY) || scrollY <= 0 || isTooOld) {
-      return null;
-    }
-
-    return {
-      pageUrl,
-      scrollY: Math.round(scrollY),
-      savedAtMs,
-    };
-  } catch (_error) {
-    return null;
-  }
-}
-
-function getCurrentWindowScrollY() {
-  return Math.round(
-    Math.max(
-      0,
-      Number(window.scrollY || 0),
-      Number(document.documentElement?.scrollTop || 0),
-      Number(document.body?.scrollTop || 0),
-    ),
-  );
-}
-
-function getMaxScrollableY() {
-  const documentElementHeight = Number(
-    document.documentElement?.scrollHeight || 0,
-  );
-  const bodyHeight = Number(document.body?.scrollHeight || 0);
-  return Math.max(
-    0,
-    Math.max(documentElementHeight, bodyHeight) - window.innerHeight,
-  );
-}
-
-function persistScrollPositionForReload() {
-  if (!isAgileBoardPage()) {
-    return;
-  }
-
-  try {
-    const pageUrl = normalizePageUrl(window.location.href);
-    if (!pageUrl) {
-      return;
-    }
-
-    const liveWindowScrollY = getCurrentWindowScrollY();
-    const scrollY = Math.max(lastKnownWindowScrollY, liveWindowScrollY);
-    if (scrollY <= 0) {
-      clearStoredScrollRestoreState();
-      return;
-    }
-
-    const state = {
-      pageUrl,
-      scrollY,
-      savedAtMs: Date.now(),
-    };
-    window.sessionStorage.setItem(
-      SCROLL_RESTORE_STATE_KEY,
-      JSON.stringify(state),
-    );
-  } catch (_error) {
-    // Ignore sessionStorage access errors.
-  }
-}
-
-function restoreScrollPositionWhenReady(targetScrollY) {
-  const normalizedTargetScrollY = Math.round(
-    Math.max(0, Number(targetScrollY)),
-  );
-  if (normalizedTargetScrollY <= 0) {
-    clearStoredScrollRestoreState();
-    setScrollRestoreOverlayHoldForScroll(false);
-    return;
-  }
-
-  const startedAtMs = Date.now();
-  const attemptRestore = () => {
-    const maxScrollableY = getMaxScrollableY();
-    const canReachTarget =
-      maxScrollableY >= normalizedTargetScrollY - SCROLL_RESTORE_TOLERANCE_PX;
-    const timedOut = Date.now() - startedAtMs >= SCROLL_RESTORE_WAIT_TIMEOUT_MS;
-
-    if (!canReachTarget && !timedOut) {
-      window.setTimeout(attemptRestore, SCROLL_RESTORE_RETRY_INTERVAL_MS);
-      return;
-    }
-
-    const finalScrollY = Math.min(normalizedTargetScrollY, maxScrollableY);
-    window.scrollTo(0, finalScrollY);
-    clearStoredScrollRestoreState();
-    setScrollRestoreOverlayHoldForScroll(false);
-  };
-
-  attemptRestore();
-}
-
-function ensureWindowScrollTracking() {
-  if (hasRegisteredScrollTracker) {
-    return;
-  }
-
-  lastKnownWindowScrollY = getCurrentWindowScrollY();
-  const updateLastKnownScrollY = () => {
-    lastKnownWindowScrollY = getCurrentWindowScrollY();
-  };
-  window.addEventListener("scroll", updateLastKnownScrollY, {
-    passive: true,
-    capture: true,
-  });
-  hasRegisteredScrollTracker = true;
-}
-
-function runRestoreScrollOnReloadFeature() {
-  if (!isAgileBoardPage()) {
-    setScrollRestoreOverlayHoldForScroll(false);
-    removeScrollRestoreOverlayIfReady();
-    return;
-  }
-
-  ensureWindowScrollTracking();
-
-  const saveScrollPosition = () => {
-    persistScrollPositionForReload();
-  };
-  window.addEventListener("pagehide", saveScrollPosition, { capture: true });
-  window.addEventListener("beforeunload", saveScrollPosition, {
-    capture: true,
-  });
-
-  const storedState = readStoredScrollRestoreState();
-  if (!storedState) {
-    setScrollRestoreOverlayHoldForScroll(false);
-    removeScrollRestoreOverlayIfReady();
-    return;
-  }
-
-  const currentPageUrl = normalizePageUrl(window.location.href);
-  if (!currentPageUrl || storedState.pageUrl !== currentPageUrl) {
-    clearStoredScrollRestoreState();
-    setScrollRestoreOverlayHoldForScroll(false);
-    removeScrollRestoreOverlayIfReady();
-    return;
-  }
-
-  const navigationType = getNavigationType();
-  const isReload = navigationType === "reload";
-  const isBackUrlRedirect = isBackUrlRedirectToCurrentBoard(currentPageUrl);
-  const isSameReferrer = isSamePageReferrerNavigation(currentPageUrl);
-  const shouldRestore = isReload || isBackUrlRedirect || isSameReferrer;
-  if (!shouldRestore) {
-    clearStoredScrollRestoreState();
-    setScrollRestoreOverlayHoldForScroll(false);
-    removeScrollRestoreOverlayIfReady();
-    return;
-  }
-
-  setScrollRestoreOverlayHoldForScroll(true);
-  restoreScrollPositionWhenReady(storedState.scrollY);
-}
-
-function readCollapsedGroupIds(storageKey) {
-  try {
-    const raw = window.sessionStorage.getItem(storageKey);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (id) =>
-        typeof id === "string" &&
-        (id === COLLAPSED_GROUP_NONE_ID || /^\d+$/.test(id)),
-    );
-  } catch (_error) {
-    return [];
-  }
-}
-
-function writeCollapsedGroupIds(storageKey, ids) {
-  try {
-    if (!Array.isArray(ids) || ids.length === 0) {
-      window.sessionStorage.removeItem(storageKey);
-    } else {
-      window.sessionStorage.setItem(storageKey, JSON.stringify(ids));
-    }
-  } catch (_error) {
-    // Ignore quota or access errors.
-  }
-}
-
-function collectCurrentCollapsedGroupIds() {
-  const collapsedIds = [];
-  document.querySelectorAll("tr.group.swimlane[data-id]").forEach((row) => {
-    if (!row.classList.contains("open")) {
-      const rawId = String(row.getAttribute("data-id") || "").trim();
-      collapsedIds.push(rawId === "" ? COLLAPSED_GROUP_NONE_ID : rawId);
-    }
-  });
-  return collapsedIds;
-}
-
-function ensureSwimlaneToolbarStyles() {
-  if (document.getElementById(SWIMLANE_TOOLBAR_STYLE_ID)) return;
-  const style = document.createElement("style");
-  style.id = SWIMLANE_TOOLBAR_STYLE_ID;
-  style.textContent = `
-    .toggle-all {
-      display: none !important;
-    }
-
-    #${SWIMLANE_TOOLBAR_ID} {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      margin-left: auto;
-    }
-
-    #${SWIMLANE_TOOLBAR_ID} .bluemine-swimlane-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0px;
-      padding: 0;
-      border: none;
-      background: none;
-      color: #269;
-      font: inherit;
-      font-size: 11px;
-      cursor: pointer;
-      line-height: 1;
-      white-space: nowrap;
-    }
-
-    #${SWIMLANE_TOOLBAR_ID} .bluemine-swimlane-btn:hover {
-      text-decoration: underline;
-    }
-
-    #${SWIMLANE_TOOLBAR_ID} .bluemine-swimlane-btn:hover svg {
-      color: #c61a1a;
-    }
-
-    #${SWIMLANE_TOOLBAR_ID} .bluemine-swimlane-btn svg {
-      width: 18px;
-      height: 18px;
-      flex: 0 0 auto;
-      color: #888;
-      position: relative;
-      top: 1px;
-    }
-
-  `;
-  (document.head || document.documentElement).appendChild(style);
-}
-
-function findBoardTable() {
-  const agileTable = document.querySelector("table.agile-board");
-  if (agileTable) return agileTable;
-  const groupRow = document.querySelector("tr.group.swimlane[data-id]");
-  return groupRow ? groupRow.closest("table") : null;
-}
-
-function findRedmineToolbar() {
-  const queryButtons =
-    document.querySelector("#query_form_with_buttons .buttons") ||
-    document.querySelector("#query_form .buttons") ||
-    document.querySelector(".query-buttons") ||
-    document.querySelector("p.buttons");
-  return queryButtons;
-}
-
-function injectSwimlaneToolbar(onCollapseAll, onExpandAll, onCollapseConfirmedUnassigned) {
-  if (document.getElementById(SWIMLANE_TOOLBAR_ID)) return;
-
-  const toolbar = document.createElement("span");
-  toolbar.id = SWIMLANE_TOOLBAR_ID;
-
-  const collapseSvg =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 20 5-5 5 5"/><path d="m7 4 5 5 5-5"/></svg>';
-  const expandSvg =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></svg>';
-  const collapseConfirmedUnassignedSvg =
-    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" x2="22" y1="8" y2="13"/><line x1="22" x2="17" y1="8" y2="13"/></svg>';
-
-  const collapseBtn = document.createElement("button");
-  collapseBtn.type = "button";
-  collapseBtn.className = "bluemine-swimlane-btn";
-  collapseBtn.innerHTML =
-    collapseSvg + '<span class="icon-label">Collapse all</span>';
-  collapseBtn.addEventListener("click", onCollapseAll);
-
-  const expandBtn = document.createElement("button");
-  expandBtn.type = "button";
-  expandBtn.className = "bluemine-swimlane-btn";
-  expandBtn.innerHTML =
-    expandSvg + '<span class="icon-label">Expand all</span>';
-  expandBtn.addEventListener("click", onExpandAll);
-
-  const collapseConfirmedUnassignedBtn = document.createElement("button");
-  collapseConfirmedUnassignedBtn.type = "button";
-  collapseConfirmedUnassignedBtn.className = "bluemine-swimlane-btn";
-  collapseConfirmedUnassignedBtn.innerHTML =
-    collapseConfirmedUnassignedSvg +
-    '<span class="icon-label">Smart collapse</span>';
-  collapseConfirmedUnassignedBtn.addEventListener("click", onCollapseConfirmedUnassigned);
-
-  toolbar.appendChild(collapseConfirmedUnassignedBtn);
-  toolbar.appendChild(collapseBtn);
-  toolbar.appendChild(expandBtn);
-
-  const redmineToolbar = findRedmineToolbar();
-  if (redmineToolbar) {
-    redmineToolbar.style.display = "flex";
-    redmineToolbar.style.alignItems = "center";
-    redmineToolbar.style.flexWrap = "wrap";
-    redmineToolbar.appendChild(toolbar);
-    return;
-  }
-
-  const boardTable = findBoardTable();
-  if (boardTable && boardTable.parentNode) {
-    toolbar.style.display = "flex";
-    toolbar.style.justifyContent = "flex-end";
-    toolbar.style.marginBottom = "6px";
-    boardTable.parentNode.insertBefore(toolbar, boardTable);
-  }
-}
-
-function getSiblingIssueRow(groupRow) {
-  // The sibling <tr class="swimlane issue"> shares the same data-id
-  // and immediately follows the group row in the DOM.
-  const id = groupRow.getAttribute("data-id");
-  if (id === null) return null;
-  let next = groupRow.nextElementSibling;
-  while (next) {
-    if (
-      next.tagName === "TR" &&
-      next.classList.contains("swimlane") &&
-      next.classList.contains("issue") &&
-      next.getAttribute("data-id") === id
-    ) {
-      return next;
-    }
-    next = next.nextElementSibling;
-  }
-  return null;
-}
-
-function swapExpanderIcon(expander, href) {
-  const use = expander.querySelector("use");
-  if (!use) return;
-  // The href attribute may be in either the default namespace or the
-  // xlink namespace depending on the Redmine version.
-  if (use.hasAttribute("href")) {
-    const current = use.getAttribute("href");
-    const base = current.split("#")[0];
-    use.setAttribute("href", `${base}#${href}`);
-  } else if (use.hasAttribute("xlink:href")) {
-    const current = use.getAttributeNS("http://www.w3.org/1999/xlink", "href");
-    const base = current.split("#")[0];
-    use.setAttributeNS(
-      "http://www.w3.org/1999/xlink",
-      "xlink:href",
-      `${base}#${href}`,
-    );
-  }
-}
-
-function collapseGroupRow(row) {
-  if (!row.classList.contains("open")) return;
-  row.classList.remove("open");
-  const expander = row.querySelector("span.expander");
-  if (expander) {
-    expander.classList.remove("icon-expanded");
-    expander.classList.add("icon-collapsed");
-    swapExpanderIcon(expander, "icon--angle-right");
-  }
-  const issueRow = getSiblingIssueRow(row);
-  if (issueRow) issueRow.style.display = "none";
-}
-
-function expandGroupRow(row) {
-  if (row.classList.contains("open")) return;
-  row.classList.add("open");
-  const expander = row.querySelector("span.expander");
-  if (expander) {
-    expander.classList.remove("icon-collapsed");
-    expander.classList.add("icon-expanded");
-    swapExpanderIcon(expander, "icon--angle-down");
-  }
-  const issueRow = getSiblingIssueRow(row);
-  if (issueRow) issueRow.style.display = "";
-}
-
-function ensureBoardScrollbarVisible() {
-  const id = "bluemine-board-scrollbar-style";
-  if (document.getElementById(id)) return;
-  const style = document.createElement("style");
-  style.id = id;
-  style.textContent = "html { overflow-y: scroll !important; }";
-  (document.head || document.documentElement).appendChild(style);
-}
-
-function runCollapsedGroupsFeature() {
-  if (!isAgileBoardPage()) return;
-
-  const boardUrl = normalizePageUrl(window.location.href);
-  if (!boardUrl) return;
-
-  const storageKey = COLLAPSED_GROUPS_SESSION_KEY_PREFIX + boardUrl;
-  let isApplyingRestoredState = false;
-
-  function persistCollapsedGroups() {
-    if (isApplyingRestoredState) return;
-    writeCollapsedGroupIds(storageKey, collectCurrentCollapsedGroupIds());
-  }
-
-  const observer = new MutationObserver((mutations) => {
-    if (isApplyingRestoredState) return;
-    let relevant = false;
-    for (const mutation of mutations) {
-      if (mutation.type !== "attributes") continue;
-      const t = mutation.target;
-      if (
-        t.tagName === "TR" &&
-        t.classList.contains("group") &&
-        t.classList.contains("swimlane") &&
-        t.hasAttribute("data-id")
-      ) {
-        relevant = true;
-        break;
-      }
-    }
-    if (relevant) persistCollapsedGroups();
-  });
-  observer.observe(document.body, {
-    subtree: true,
-    attributes: true,
-    attributeFilter: ["class"],
-  });
-
-  const storedIds = readCollapsedGroupIds(storageKey);
-  if (storedIds.length > 0) {
-    const storedIdSet = new Set(storedIds);
-    isApplyingRestoredState = true;
-    document.querySelectorAll("tr.group.swimlane[data-id]").forEach((row) => {
-      const rawId = String(row.getAttribute("data-id") || "").trim();
-      const storageId = rawId === "" ? COLLAPSED_GROUP_NONE_ID : rawId;
-      if (storedIdSet.has(storageId)) {
-        collapseGroupRow(row);
-      }
-    });
-    window.setTimeout(() => {
-      isApplyingRestoredState = false;
-    }, 0);
-  }
-
-  ensureSwimlaneToolbarStyles();
-
-  function findConfirmedColumnInfo() {
-    const table = findBoardTable();
-    if (!table) return null;
-    for (const th of table.querySelectorAll("th[data-column-id]")) {
-      if (th.textContent.trim().toLowerCase().startsWith("confirmed")) {
-        const siblings = Array.from(th.parentElement.children);
-        return {
-          columnId: th.getAttribute("data-column-id"),
-          columnIndex: siblings.indexOf(th),
-        };
-      }
-    }
-    return null;
-  }
-
-  function isRowAllConfirmedAndUnassigned(groupRow, confirmedColumnInfo) {
-    const issueRow = getSiblingIssueRow(groupRow);
-    if (!issueRow) return false;
-    const allCells = Array.from(issueRow.querySelectorAll("td"));
-    if (allCells.length === 0) return false;
-    let confirmedCell = issueRow.querySelector(
-      `td[data-column-id="${confirmedColumnInfo.columnId}"]`,
-    );
-    if (!confirmedCell) {
-      confirmedCell = allCells[confirmedColumnInfo.columnIndex] ?? null;
-    }
-    if (!confirmedCell) return false;
-    const confirmedCards = confirmedCell.querySelectorAll(".issue-card[data-id]");
-    if (confirmedCards.length === 0) return false;
-    for (const cell of allCells) {
-      if (cell === confirmedCell) continue;
-      if (cell.querySelector(".issue-card[data-id]")) return false;
-    }
-    for (const card of confirmedCards) {
-      const assignee = card.querySelector("p.info.assigned-user a.user");
-      if (assignee && assignee.textContent.trim()) return false;
-    }
-    return true;
-  }
-
-  function handleCollapseAll() {
-    isApplyingRestoredState = true;
-    document.querySelectorAll("tr.group.swimlane[data-id]").forEach((row) => {
-      collapseGroupRow(row);
-    });
-    writeCollapsedGroupIds(storageKey, collectCurrentCollapsedGroupIds());
-    window.setTimeout(() => {
-      isApplyingRestoredState = false;
-    }, 0);
-  }
-
-  function handleExpandAll() {
-    isApplyingRestoredState = true;
-    document.querySelectorAll("tr.group.swimlane[data-id]").forEach((row) => {
-      expandGroupRow(row);
-    });
-    writeCollapsedGroupIds(storageKey, []);
-    window.setTimeout(() => {
-      isApplyingRestoredState = false;
-    }, 0);
-  }
-
-  function handleCollapseConfirmedUnassigned() {
-    const confirmedColumnInfo = findConfirmedColumnInfo();
-    if (!confirmedColumnInfo) return;
-    isApplyingRestoredState = true;
-    document.querySelectorAll("tr.group.swimlane[data-id]").forEach((row) => {
-      if (isRowAllConfirmedAndUnassigned(row, confirmedColumnInfo)) {
-        collapseGroupRow(row);
-      }
-    });
-    writeCollapsedGroupIds(storageKey, collectCurrentCollapsedGroupIds());
-    window.setTimeout(() => {
-      isApplyingRestoredState = false;
-    }, 0);
-  }
-
-  injectSwimlaneToolbar(handleCollapseAll, handleExpandAll, handleCollapseConfirmedUnassigned);
-}
-
 function mapMrState(state) {
   if (state === "opened") {
     return { label: "Open", className: "is-open" };
@@ -2018,6 +1225,7 @@ async function applyGitlabAssigneeAvatarsToTaskCards(
       assigneeEntries,
       cachedResult.avatarsByName,
     );
+    Object.assign(_lastAvatarsByName, cachedResult.avatarsByName);
     signalCachedApplied();
 
     const unresolvedAssigneeNames = uniqueAssigneeNames.filter(
@@ -2039,6 +1247,7 @@ async function applyGitlabAssigneeAvatarsToTaskCards(
       assigneeEntries,
       networkResult.avatarsByName,
     );
+    Object.assign(_lastAvatarsByName, networkResult.avatarsByName);
   } catch (error) {
     console.warn("[Bluemine] Failed to load GitLab assignee avatars:", error);
     signalCachedApplied();
@@ -2047,7 +1256,54 @@ async function applyGitlabAssigneeAvatarsToTaskCards(
   return requestMetricsSummary;
 }
 
-async function runGitlabMrStatusFeature() {
+// Module-level state for the drag-drop card observer.
+let _lastMrResults = null;
+let _lastAvatarsByName = {};
+let _cardObserver = null;
+
+// Re-apply GitLab badges to cards replaced by the Agile plugin's drag-and-drop.
+// When a card is dragged to a new column, agileBoard.successSortable replaces
+// its DOM node with fresh server HTML, losing any injected badges. A
+// MutationObserver watches for newly added .issue-card nodes and re-applies
+// from the in-memory MR cache without an extra network request.
+// Note: innerHTML swaps (soft reload) add <tbody> nodes, not .issue-card, so
+// they never trigger this observer — runGitlabMrStatusFeature handles those.
+function startCardObserverForDragDrop(boardProjectName) {
+  if (_cardObserver) {
+    _cardObserver.disconnect();
+    _cardObserver = null;
+  }
+
+  const boardTable = findBoardTable();
+  if (!boardTable) return;
+
+  _cardObserver = new MutationObserver((mutations) => {
+    const hasNewCard = mutations.some((mutation) =>
+      Array.from(mutation.addedNodes).some(
+        (node) =>
+          node.nodeType === Node.ELEMENT_NODE &&
+          node.classList?.contains("issue-card") &&
+          !node.classList?.contains("ui-sortable-placeholder"),
+      ),
+    );
+    if (!hasNewCard) return;
+
+    // Apply synchronously — MutationObserver callbacks fire as microtasks,
+    // before the browser paints, so the replaced card never appears without
+    // its badges (no blink).
+    if (_lastMrResults !== null) {
+      applyGitlabMergeRequestsToBoard(_lastMrResults, { animate: true });
+    }
+    applyTaskCardAssigneeAvatarsFromMap(
+      collectTaskCardAssigneeEntries(),
+      _lastAvatarsByName,
+    );
+  });
+
+  _cardObserver.observe(boardTable, { childList: true, subtree: true });
+}
+
+async function runGitlabMrStatusFeature(options = {}) {
   const boardProjectName = getCurrentBoardProjectName();
   if (!boardProjectName) {
     return;
@@ -2059,213 +1315,77 @@ async function runGitlabMrStatusFeature() {
   const boardIssueIds = collectBoardIssueIds();
   const boardCacheKey =
     normalizePageUrl(window.location.href) || boardProjectName;
-  const hasVisibleOverlayAtStart = Boolean(
-    document.getElementById(SCROLL_RESTORE_OVERLAY_ID),
-  );
-  const canCreateOverlayForGitlab =
-    !hasVisibleOverlayAtStart &&
-    getNavigationType() === "reload" &&
-    boardIssueIds.length > 0;
-  if (hasVisibleOverlayAtStart) {
-    // Hold immediately to avoid a race where scroll restoration clears
-    // the overlay before cached GitLab content is injected.
-    setScrollRestoreOverlayHoldForGitlab(true);
-  }
+
   const isGitlabReady = await isGitlabProjectReady(boardProjectName);
-  const shouldWaitForGitlabCachedInjection =
-    isGitlabReady && (hasVisibleOverlayAtStart || canCreateOverlayForGitlab);
-  if (shouldWaitForGitlabCachedInjection && canCreateOverlayForGitlab) {
-    ensureScrollRestoreOverlay();
-    setScrollRestoreOverlayHoldForGitlab(true);
-  } else if (hasVisibleOverlayAtStart && !shouldWaitForGitlabCachedInjection) {
-    setScrollRestoreOverlayHoldForGitlab(false);
-  }
-  let hasAppliedCachedMrData = false;
-  let hasAppliedCachedAvatarData = false;
-  let hasRequestedOverlayReleaseAfterCache = false;
-  const releaseScrollOverlayAfterGitlabCache = () => {
-    if (!shouldWaitForGitlabCachedInjection) {
-      return;
-    }
-
-    if (!hasAppliedCachedMrData || !hasAppliedCachedAvatarData) {
-      return;
-    }
-    if (hasRequestedOverlayReleaseAfterCache) {
-      return;
-    }
-
-    hasRequestedOverlayReleaseAfterCache = true;
-    waitForNextPaint().then(() => {
-      setScrollRestoreOverlayHoldForGitlab(false);
-    });
-  };
+  if (!isGitlabReady) return;
 
   const avatarMetricsPromise = applyGitlabAssigneeAvatarsToTaskCards(
     boardProjectName,
-    {
-      onCachedApplied: () => {
-        hasAppliedCachedAvatarData = true;
-        releaseScrollOverlayAfterGitlabCache();
-      },
-    },
+    {},
   );
-  try {
-    if (boardIssueIds.length === 0) {
-      applyGitlabMergeRequestsToBoard([], { animate: false });
-      hasAppliedCachedMrData = true;
-      releaseScrollOverlayAfterGitlabCache();
-    } else {
-      try {
-        const cachedMrResult = await fetchGitlabMergeRequests(
-          boardProjectName,
-          boardIssueIds,
-          { cacheOnly: true, boardCacheKey },
-        );
-        mergeGitlabRequestMetrics(
-          requestMetricsSummary,
-          cachedMrResult.requestMetrics,
-        );
-        applyGitlabMergeRequestsToBoard(cachedMrResult.mergeRequests, {
-          animate: false,
-        });
-      } catch (error) {
-        console.warn(
-          "[Bluemine] Failed to load cached GitLab merge requests:",
-          error,
-        );
-      } finally {
-        hasAppliedCachedMrData = true;
-        releaseScrollOverlayAfterGitlabCache();
-      }
 
-      try {
-        const networkMrResult = await fetchGitlabMergeRequests(
-          boardProjectName,
-          boardIssueIds,
-          { boardCacheKey },
-        );
-        mergeGitlabRequestMetrics(
-          requestMetricsSummary,
-          networkMrResult.requestMetrics,
-        );
-        applyGitlabMergeRequestsToBoard(networkMrResult.mergeRequests, {
-          animate: true,
-        });
-      } catch (error) {
-        console.warn("[Bluemine] Failed to load GitLab merge requests:", error);
-      }
-    }
-
+  if (boardIssueIds.length === 0) {
+    applyGitlabMergeRequestsToBoard([], { animate: false });
+    _lastMrResults = [];
+    options.onCachedApplied?.();
+  } else {
     try {
-      const avatarRequestMetrics = await avatarMetricsPromise;
-      mergeGitlabRequestMetrics(requestMetricsSummary, avatarRequestMetrics);
+      const cachedMrResult = await fetchGitlabMergeRequests(
+        boardProjectName,
+        boardIssueIds,
+        { cacheOnly: true, boardCacheKey },
+      );
+      mergeGitlabRequestMetrics(
+        requestMetricsSummary,
+        cachedMrResult.requestMetrics,
+      );
+      applyGitlabMergeRequestsToBoard(cachedMrResult.mergeRequests, {
+        animate: false,
+      });
+      _lastMrResults = cachedMrResult.mergeRequests;
     } catch (error) {
       console.warn(
-        "[Bluemine] Failed to apply GitLab assignee avatars:",
+        "[Bluemine] Failed to load cached GitLab merge requests:",
         error,
       );
     }
 
-    const durationMs = Math.max(0, Math.round(performance.now() - startTimeMs));
-    const durationSeconds = (durationMs / 1000).toFixed(2);
-    console.info(
-      `[Bluemine] Loaded Gitlab info in ${durationSeconds} seconds with ${requestMetricsSummary.requestCount} requests (${durationMs} ms)`,
-    );
-  } finally {
-    if (shouldWaitForGitlabCachedInjection) {
-      setScrollRestoreOverlayHoldForGitlab(false);
-    }
-  }
-}
+    options.onCachedApplied?.();
 
-function runShiftHoverSelectionFeature() {
-  if (!isAgileBoardPage()) return;
-
-  let shiftHeld = false;
-
-  function selectCard(card) {
-    if (!card || card.classList.contains("context-menu-selection")) return;
-    card.classList.add("context-menu-selection");
-    const checkbox = card.querySelector('input[name="ids[]"]');
-    if (checkbox) {
-      checkbox.checked = true;
-      checkbox.dispatchEvent(new Event("change", { bubbles: true }));
-    }
-  }
-
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Shift") return;
-    shiftHeld = true;
-    selectCard(document.querySelector(".issue-card:hover"));
-  }, { capture: true });
-
-  document.addEventListener("keyup", (e) => {
-    if (e.key === "Shift") shiftHeld = false;
-  }, { capture: true });
-
-  window.addEventListener("blur", () => {
-    shiftHeld = false;
-  });
-
-  document.addEventListener("mouseover", (e) => {
-    if (!shiftHeld) return;
-    selectCard(e.target.closest(".issue-card"));
-  });
-}
-
-browserAPI.storage.local.get(
-  {
-    [GITLAB_MR_FEATURE_KEY]: false,
-    [ENHANCED_AGILE_BOARD_FEATURE_KEY]: false,
-    [SHIFT_HOVER_SELECTION_FEATURE_KEY]: false,
-  },
-  async (result) => {
-    if (result[ENHANCED_AGILE_BOARD_FEATURE_KEY] && isAgileBoardPage()) {
-      window.addEventListener("pageshow", (event) => {
-        if (event.persisted) {
-          window.location.reload();
-        }
+    try {
+      const networkMrResult = await fetchGitlabMergeRequests(
+        boardProjectName,
+        boardIssueIds,
+        { boardCacheKey },
+      );
+      mergeGitlabRequestMetrics(
+        requestMetricsSummary,
+        networkMrResult.requestMetrics,
+      );
+      applyGitlabMergeRequestsToBoard(networkMrResult.mergeRequests, {
+        animate: true,
       });
+      _lastMrResults = networkMrResult.mergeRequests;
+    } catch (error) {
+      console.warn("[Bluemine] Failed to load GitLab merge requests:", error);
     }
+  }
 
-    const matchesDetectedRedmineHeaders = await isDetectedRedmineTab();
-    if (!matchesDetectedRedmineHeaders) {
-      if (result[ENHANCED_AGILE_BOARD_FEATURE_KEY] && isAgileBoardPage()) {
-        ensureBoardScrollbarVisible();
-        runRestoreScrollOnReloadFeature();
-        runCollapsedGroupsFeature();
-      } else {
-        removeScrollRestoreOverlayIfReady();
-      }
-      if (result[SHIFT_HOVER_SELECTION_FEATURE_KEY] && isAgileBoardPage()) {
-        runShiftHoverSelectionFeature();
-      }
-      return;
-    }
-
-    const hasVisibleScrollRestoreOverlay = Boolean(
-      document.getElementById(SCROLL_RESTORE_OVERLAY_ID),
+  try {
+    const avatarRequestMetrics = await avatarMetricsPromise;
+    mergeGitlabRequestMetrics(requestMetricsSummary, avatarRequestMetrics);
+  } catch (error) {
+    console.warn(
+      "[Bluemine] Failed to apply GitLab assignee avatars:",
+      error,
     );
-    if (result[GITLAB_MR_FEATURE_KEY] && hasVisibleScrollRestoreOverlay) {
-      // Pre-hold so runRestoreScrollOnReloadFeature cannot remove the
-      // overlay before runGitlabMrStatusFeature has a chance to gate it.
-      setScrollRestoreOverlayHoldForGitlab(true);
-    }
+  }
 
-    if (result[ENHANCED_AGILE_BOARD_FEATURE_KEY]) {
-      if (isAgileBoardPage()) ensureBoardScrollbarVisible();
-      runCollapsedGroupsFeature();
-      runRestoreScrollOnReloadFeature();
-    } else {
-      removeScrollRestoreOverlayIfReady();
-    }
-    if (result[SHIFT_HOVER_SELECTION_FEATURE_KEY] && isAgileBoardPage()) {
-      runShiftHoverSelectionFeature();
-    }
+  startCardObserverForDragDrop(boardProjectName);
 
-    if (result[GITLAB_MR_FEATURE_KEY]) {
-      await runGitlabMrStatusFeature();
-    }
-  },
-);
+  const durationMs = Math.max(0, Math.round(performance.now() - startTimeMs));
+  const durationSeconds = (durationMs / 1000).toFixed(2);
+  console.info(
+    `[Bluemine] Loaded Gitlab info in ${durationSeconds} seconds with ${requestMetricsSummary.requestCount} requests (${durationMs} ms)`,
+  );
+}
