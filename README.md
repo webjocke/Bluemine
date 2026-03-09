@@ -24,6 +24,37 @@
 
 Bluemine is a Manifest V3 browser extension for Chrome and Firefox that enhances Redmine with optional, independently toggleable improvements.
 
+## Getting Started
+
+### Install
+
+| Browser | Link |
+| --- | --- |
+| **Firefox** | [Firefox Add-ons — Bluemine](https://addons.mozilla.org/en-US/firefox/addon/bluemine/) |
+| **Chrome / Edge / Brave** | Install from the [latest GitHub Release][release-url] (see below) |
+
+### Install from GitHub Release (Chrome/Edge/Brave)
+
+1. Download the latest `bluemine-extension-<version>.zip` from the [Releases page][release-url].
+2. Extract the ZIP.
+3. Go to `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select the extracted folder.
+
+### Install from GitHub Actions (latest build)
+
+1. Open the [Build workflow runs][build-url].
+2. Download the latest `bluemine-extension-<version>.zip` artifact.
+3. Extract the ZIP and load as an unpacked extension:
+   - **Chrome/Edge/Brave**: `chrome://extensions` → Developer mode → Load unpacked
+   - **Firefox**: `about:debugging#/runtime/this-firefox` → Load Temporary Add-on → pick `manifest.json`
+
+No build step required.
+
+### Prerequisites
+
+- Chrome/Edge/Brave or Firefox 121+
+- Access to a Redmine instance
+- Optional: GitLab Personal Access Token for MR integration
+
 ## Features
 
 | Feature | What it does |
@@ -97,24 +128,6 @@ Works standalone or after a category prefix (e.g. `as mak`). Abbreviation matche
 ### Batch mode
 
 Tab queues commands as chips. Multiple commands from different categories are merged into a single request on Enter. Each category allows only one chip at a time — queuing a second command in the same category replaces the first. **Bulk Edit and Copy IDs cannot be chained** with other commands.
-
-## Getting Started
-
-### Prerequisites
-
-- Chrome/Edge/Brave or Firefox 121+
-- Access to a Redmine instance
-- Optional: GitLab Personal Access Token for MR integration
-
-### Install from GitHub Actions
-
-1. Open the [Build workflow runs][build-url].
-2. Download the latest `bluemine-extension-<version>.zip` artifact.
-3. Extract the ZIP and load as an unpacked extension:
-   - **Chrome/Edge**: `chrome://extensions` → Developer mode → Load unpacked
-   - **Firefox**: `about:debugging#/runtime/this-firefox` → Load Temporary Add-on → pick `manifest.json`
-
-No build step required.
 
 ## Configuration
 
